@@ -8,7 +8,7 @@ set -e
 export PROJECT_ID=$(gcloud config get-value project)
 export REGION=${REGION:-us-central1}
 export DB_INSTANCE=${CLOUD_SQL_INSTANCE:-opsbot-db-instance}
-export DB_PASSWORD=${DB_PASSWORD:-opsbot-hackathon-2025}
+export DB_PASSWORD="your-actual-password-here"
 
 echo "=== Deploying MCP Toolbox for Databases ==="
 
