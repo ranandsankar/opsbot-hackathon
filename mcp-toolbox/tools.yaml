@@ -1,0 +1,152 @@
+sources:
+  opsbot-db:
+    kind: "cloud-sql-postgres"
+    project: "${GOOGLE_CLOUD_PROJECT}"
+    region: "${REGION}"
+    instance: "${CLOUD_SQL_INSTANCE}"
+    database: "opsbot_db"
+    user: "postgres"
+    password: "${DB_PASSWORD}"
+
+tools:
+  query_open_incidents:
+    kind: postgres-sql
+    source: opsbot-db
+    description: >
+      Retrieves all currently open or investigating incidents with service name,
+      severity, category, and how long they have been open.
+    statement: |
+      SELECT i.id, i.severity, i.category, i.subsystem, i.title,
+             i.description, i.status, s.name as service_name, s.team,
+             ROUND(EXTRACT(EPOCH FROM (NOW() - i.created_at))/60) as minutes_open
+      FROM incidents i JOIN services s ON i.service_id = s.id
+      WHERE i.status IN ('open', 'investigating')
+      ORDER BY CASE i.severity WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 4 END;
+
+  query_incidents_by_service:
+    kind: postgres-sql
+    source: opsbot-db
+    description: Retrieves incident history for a specific service by name.
+    parameters:
+      - name: service_name
+        type: string
+        description: Service name (e.g., 'payment-service', 'api-gateway')
+    statement: |
+      SELECT i.id, i.severity, i.category, i.title, i.status,
+             i.root_cause, i.resolution, i.mttr_minutes, i.created_at
+      FROM incidents i JOIN services s ON i.service_id = s.id
+      WHERE LOWER(s.name) LIKE LOWER('%' || $1 || '%')
+      ORDER BY i.created_at DESC LIMIT 10;
+
+  query_incident_patterns:
+    kind: postgres-sql
+    source: opsbot-db
+    description: Analyzes incident patterns by category and subsystem with average MTTR.
+    statement: |
+      SELECT category, subsystem, COUNT(*) as count,
+             ROUND(AVG(mttr_minutes)) as avg_mttr_min,
+             MAX(created_at) as last_seen
+      FROM incidents WHERE resolved_at IS NOT NULL
+      GROUP BY category, subsystem ORDER BY count DESC;
+
+  query_service_health:
+    kind: postgres-sql
+    source: opsbot-db
+    description: Returns current health status and SLO performance of all services.
+    statement: |
+      SELECT name, team, status, tier, slo_target, current_slo,
+             CASE WHEN current_slo < slo_target THEN 'BREACHING'
+                  WHEN current_slo < slo_target + 0.1 THEN 'AT RISK'
+                  ELSE 'HEALTHY' END as slo_status
+      FROM services
+      ORDER BY CASE status WHEN 'unhealthy' THEN 0 WHEN 'degraded' THEN 1 ELSE 2 END;
+
+  query_degraded_services:
+    kind: postgres-sql
+    source: opsbot-db
+    description: Returns only services currently degraded or breaching SLO.
+    statement: |
+      SELECT name, team, status, tier, slo_target, current_slo
+      FROM services
+      WHERE status != 'healthy' OR current_slo < slo_target
+      ORDER BY current_slo ASC;
+
+  search_runbook:
+    kind: postgres-sql
+    source: opsbot-db
+    description: Searches for runbook by incident category and subsystem.
+    parameters:
+      - name: category
+        type: string
+        description: Incident category (e.g., 'high_latency', 'crash_loop')
+      - name: subsystem
+        type: string
+        description: Affected subsystem (e.g., 'database', 'kubernetes')
+    statement: |
+      SELECT title, steps, escalation_policy
+      FROM runbooks
+      WHERE LOWER(category) LIKE LOWER('%' || $1 || '%')
+         OR LOWER(subsystem) LIKE LOWER('%' || $2 || '%')
+      ORDER BY CASE WHEN LOWER(category) = LOWER($1) THEN 0 ELSE 1 END
+      LIMIT 3;
+
+  query_on_call_now:
+    kind: postgres-sql
+    source: opsbot-db
+    description: Returns who is currently on-call for all teams.
+    statement: |
+      SELECT team, engineer, role, contact_method
+      FROM on_call_schedule
+      WHERE CURRENT_DATE BETWEEN start_date AND end_date
+      ORDER BY team, role;
+
+  query_on_call_for_team:
+    kind: postgres-sql
+    source: opsbot-db
+    description: Finds who is on-call for a specific team.
+    parameters:
+      - name: team_name
+        type: string
+        description: Team name (e.g., 'Platform', 'Payments')
+    statement: |
+      SELECT engineer, role, contact_method
+      FROM on_call_schedule
+      WHERE LOWER(team) LIKE LOWER('%' || $1 || '%')
+        AND CURRENT_DATE BETWEEN start_date AND end_date;
+
+  query_tasks_for_incident:
+    kind: postgres-sql
+    source: opsbot-db
+    description: Retrieves all tasks linked to a specific incident.
+    parameters:
+      - name: incident_id
+        type: integer
+        description: The incident ID
+    statement: |
+      SELECT t.id, t.title, t.assignee, t.status, t.priority, t.due_date
+      FROM tasks t WHERE t.incident_id = $1
+      ORDER BY CASE t.priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 ELSE 3 END;
+
+  query_open_tasks:
+    kind: postgres-sql
+    source: opsbot-db
+    description: Returns all open tasks with assignment and linked incident info.
+    statement: |
+      SELECT t.id, t.title, t.assignee, t.status, t.priority, t.due_date,
+             i.title as incident_title, i.severity
+      FROM tasks t JOIN incidents i ON t.incident_id = i.id
+      WHERE t.status IN ('open', 'in_progress')
+      ORDER BY CASE t.priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 ELSE 3 END;
+
+toolsets:
+  opsbot_tools:
+    - query_open_incidents
+    - query_incidents_by_service
+    - query_incident_patterns
+    - query_service_health
+    - query_degraded_services
+    - search_runbook
+    - query_on_call_now
+    - query_on_call_for_team
+    - query_tasks_for_incident
+    - query_open_tasks
